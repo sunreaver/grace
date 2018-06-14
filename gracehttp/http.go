@@ -14,14 +14,15 @@ import (
 	"sync"
 	"syscall"
 
-	"github.com/facebookgo/grace/gracenet"
 	"github.com/facebookgo/httpdown"
+	"github.com/sunreaver/grace/gracenet"
 )
 
 var (
-	logger     *log.Logger
-	didInherit = os.Getenv("LISTEN_FDS") != ""
-	ppid       = os.Getppid()
+	logger       *log.Logger
+	didInherit   = os.Getenv("LISTEN_FDS") != ""
+	ppid         = os.Getppid()
+	singletonApp *app
 )
 
 type option func(*app)
@@ -35,6 +36,7 @@ type app struct {
 	sds             []httpdown.Server
 	preStartProcess func() error
 	errors          chan error
+	waitWG          sync.WaitGroup
 }
 
 func newApp(servers []*http.Server) *app {
@@ -74,18 +76,17 @@ func (a *app) serve() {
 }
 
 func (a *app) wait() {
-	var wg sync.WaitGroup
-	wg.Add(len(a.sds) * 2) // Wait & Stop
-	go a.signalHandler(&wg)
+	a.waitWG.Add(len(a.sds) * 2) // Wait & Stop
+	// go a.signalHandler(&wg)
 	for _, s := range a.sds {
 		go func(s httpdown.Server) {
-			defer wg.Done()
+			defer a.waitWG.Done()
 			if err := s.Wait(); err != nil {
 				a.errors <- err
 			}
 		}(s)
 	}
-	wg.Wait()
+	a.waitWG.Wait()
 }
 
 func (a *app) term(wg *sync.WaitGroup) {
@@ -101,7 +102,7 @@ func (a *app) term(wg *sync.WaitGroup) {
 
 func (a *app) signalHandler(wg *sync.WaitGroup) {
 	ch := make(chan os.Signal, 10)
-	signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM, syscall.SIGUSR2)
+	signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 	for {
 		sig := <-ch
 		switch sig {
@@ -111,7 +112,7 @@ func (a *app) signalHandler(wg *sync.WaitGroup) {
 			signal.Stop(ch)
 			a.term(wg)
 			return
-		case syscall.SIGUSR2:
+		case syscall.SIGQUIT:
 			err := a.preStartProcess()
 			if err != nil {
 				a.errors <- err
@@ -179,18 +180,43 @@ func (a *app) run() error {
 // ServeWithOptions does the same as Serve, but takes a set of options to
 // configure the app struct.
 func ServeWithOptions(servers []*http.Server, options ...option) error {
-	a := newApp(servers)
+	singletonApp = newApp(servers)
 	for _, opt := range options {
-		opt(a)
+		opt(singletonApp)
 	}
-	return a.run()
+	return singletonApp.run()
 }
 
-// Serve will serve the given http.Servers and will monitor for signals
-// allowing for graceful termination (SIGTERM) or restart (SIGUSR2).
+// Serve will serve the given http.Servers.
 func Serve(servers ...*http.Server) error {
-	a := newApp(servers)
-	return a.run()
+	singletonApp = newApp(servers)
+	return singletonApp.run()
+}
+
+func Restart() error {
+	if singletonApp != nil {
+		err := singletonApp.preStartProcess()
+		if err != nil {
+			singletonApp.errors <- err
+			return err
+		}
+		// we only return here if there's an error, otherwise the new process
+		// will send us a TERM when it's ready to trigger the actual shutdown.
+		if pid, err := singletonApp.net.StartProcess(); err != nil {
+			singletonApp.errors <- err
+			return err
+		} else if logger != nil {
+			logger.Println("New Process id: ", pid)
+		}
+	}
+	return nil
+}
+
+func Shutdown() error {
+	if singletonApp != nil {
+		singletonApp.term(&singletonApp.waitWG)
+	}
+	return nil
 }
 
 // PreStartProcess configures a callback to trigger during graceful restart
