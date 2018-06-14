@@ -19,10 +19,9 @@ import (
 )
 
 var (
-	logger       *log.Logger
-	didInherit   = os.Getenv("LISTEN_FDS") != ""
-	ppid         = os.Getppid()
-	singletonApp *app
+	logger     *log.Logger
+	didInherit = os.Getenv("LISTEN_FDS") != ""
+	ppid       = os.Getppid()
 )
 
 type option func(*app)
@@ -35,8 +34,10 @@ type app struct {
 	listeners       []net.Listener
 	sds             []httpdown.Server
 	preStartProcess func() error
+	sufStartProcess func() error
 	errors          chan error
 	waitWG          *sync.WaitGroup
+	restartSig      os.Signal
 }
 
 func newApp(servers []*http.Server) *app {
@@ -48,6 +49,7 @@ func newApp(servers []*http.Server) *app {
 		sds:       make([]httpdown.Server, 0, len(servers)),
 
 		preStartProcess: func() error { return nil },
+		sufStartProcess: func() error { return nil },
 		// 2x num servers for possible Close or Stop errors + 1 for possible
 		// StartProcess error.
 		errors: make(chan error, 1+(len(servers)*2)),
@@ -78,7 +80,7 @@ func (a *app) serve() {
 func (a *app) wait() {
 	a.waitWG = &sync.WaitGroup{}
 	a.waitWG.Add(len(a.sds) * 2) // Wait & Stop
-	// go a.signalHandler(&wg)
+	go a.signalHandler(a.waitWG)
 	for _, s := range a.sds {
 		go func(s httpdown.Server) {
 			defer a.waitWG.Done()
@@ -93,9 +95,6 @@ func (a *app) wait() {
 func (a *app) term(wg *sync.WaitGroup) {
 	for _, s := range a.sds {
 		go func(s httpdown.Server) {
-			defer func() {
-				recover()
-			}()
 			defer wg.Done()
 			if err := s.Stop(); err != nil {
 				a.errors <- err
@@ -106,26 +105,29 @@ func (a *app) term(wg *sync.WaitGroup) {
 
 func (a *app) signalHandler(wg *sync.WaitGroup) {
 	ch := make(chan os.Signal, 10)
-	signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
+	signal.Notify(ch, a.restartSig)
 	for {
-		sig := <-ch
-		switch sig {
-		case syscall.SIGINT, syscall.SIGTERM:
-			// this ensures a subsequent INT/TERM will trigger standard go behaviour of
-			// terminating.
-			signal.Stop(ch)
-			a.term(wg)
-			return
-		case syscall.SIGQUIT:
-			err := a.preStartProcess()
+		<-ch
+		signal.Stop(ch)
+		err := a.preStartProcess()
+		if err != nil {
+			a.errors <- err
+		}
+		// we only return here if there's an error, otherwise the new process
+		// will send us a TERM when it's ready to trigger the actual shutdown.
+		if pid, err := a.net.StartProcess(); err != nil {
+			a.errors <- err
+		} else {
+			if logger != nil {
+				logger.Printf("New pid %d.", pid)
+			}
+			a.term(a.waitWG)
+			a.waitWG.Wait()
+			err = a.sufStartProcess()
 			if err != nil {
 				a.errors <- err
 			}
-			// we only return here if there's an error, otherwise the new process
-			// will send us a TERM when it's ready to trigger the actual shutdown.
-			if _, err := a.net.StartProcess(); err != nil {
-				a.errors <- err
-			}
+			return
 		}
 	}
 }
@@ -172,6 +174,9 @@ func (a *app) run() error {
 		if err == nil {
 			panic("unexpected nil error")
 		}
+		if logger != nil {
+			logger.Printf("Exiting err %v.", err)
+		}
 		return err
 	case <-waitdone:
 		if logger != nil {
@@ -183,44 +188,21 @@ func (a *app) run() error {
 
 // ServeWithOptions does the same as Serve, but takes a set of options to
 // configure the app struct.
-func ServeWithOptions(servers []*http.Server, options ...option) error {
-	singletonApp = newApp(servers)
+func ServeWithOptions(restartSig os.Signal, servers []*http.Server, options ...option) error {
+	a := newApp(servers)
+	a.restartSig = restartSig
 	for _, opt := range options {
-		opt(singletonApp)
+		opt(a)
 	}
-	return singletonApp.run()
+	return a.run()
 }
 
 // Serve will serve the given http.Servers.
-func Serve(servers ...*http.Server) error {
-	singletonApp = newApp(servers)
-	return singletonApp.run()
-}
-
-func Restart() error {
-	if singletonApp != nil {
-		err := singletonApp.preStartProcess()
-		if err != nil {
-			singletonApp.errors <- err
-			return err
-		}
-		// we only return here if there's an error, otherwise the new process
-		// will send us a TERM when it's ready to trigger the actual shutdown.
-		if pid, err := singletonApp.net.StartProcess(); err != nil {
-			singletonApp.errors <- err
-			return err
-		} else if logger != nil {
-			logger.Println("New Process id: ", pid)
-		}
-	}
-	return nil
-}
-
-func Shutdown() error {
-	if singletonApp != nil {
-		singletonApp.term(singletonApp.waitWG)
-	}
-	return nil
+// restartSig: 当进程接收到系统信号，会进行平滑重启操作
+func Serve(restartSig os.Signal, servers ...*http.Server) error {
+	a := newApp(servers)
+	a.restartSig = restartSig
+	return a.run()
 }
 
 // PreStartProcess configures a callback to trigger during graceful restart
@@ -229,6 +211,14 @@ func Shutdown() error {
 func PreStartProcess(hook func() error) option {
 	return func(a *app) {
 		a.preStartProcess = hook
+	}
+}
+
+// SufStartProcess configures a callback to trigger during graceful restart
+// directly end started the successor process.
+func SufStartProcess(hook func() error) option {
+	return func(a *app) {
+		a.sufStartProcess = hook
 	}
 }
 
