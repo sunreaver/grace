@@ -36,7 +36,7 @@ type app struct {
 	sds             []httpdown.Server
 	preStartProcess func() error
 	errors          chan error
-	waitWG          sync.WaitGroup
+	waitWG          *sync.WaitGroup
 }
 
 func newApp(servers []*http.Server) *app {
@@ -76,6 +76,7 @@ func (a *app) serve() {
 }
 
 func (a *app) wait() {
+	a.waitWG = &sync.WaitGroup{}
 	a.waitWG.Add(len(a.sds) * 2) // Wait & Stop
 	// go a.signalHandler(&wg)
 	for _, s := range a.sds {
@@ -92,6 +93,9 @@ func (a *app) wait() {
 func (a *app) term(wg *sync.WaitGroup) {
 	for _, s := range a.sds {
 		go func(s httpdown.Server) {
+			defer func() {
+				recover()
+			}()
 			defer wg.Done()
 			if err := s.Stop(); err != nil {
 				a.errors <- err
@@ -214,7 +218,7 @@ func Restart() error {
 
 func Shutdown() error {
 	if singletonApp != nil {
-		singletonApp.term(&singletonApp.waitWG)
+		singletonApp.term(singletonApp.waitWG)
 	}
 	return nil
 }
