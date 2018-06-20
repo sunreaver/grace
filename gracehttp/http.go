@@ -5,6 +5,7 @@ package gracehttp
 import (
 	"bytes"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -36,7 +37,6 @@ type app struct {
 	preStartProcess func() error
 	sufStartProcess func() error
 	errors          chan error
-	waitWG          *sync.WaitGroup
 	restartSig      os.Signal
 }
 
@@ -78,18 +78,18 @@ func (a *app) serve() {
 }
 
 func (a *app) wait() {
-	a.waitWG = &sync.WaitGroup{}
-	a.waitWG.Add(len(a.sds) * 2) // Wait & Stop
-	go a.signalHandler(a.waitWG)
+	var wg sync.WaitGroup
+	wg.Add(len(a.sds) * 2) // Wait & Stop
+	go a.signalHandler(&wg)
 	for _, s := range a.sds {
 		go func(s httpdown.Server) {
-			defer a.waitWG.Done()
+			defer wg.Done()
 			if err := s.Wait(); err != nil {
 				a.errors <- err
 			}
 		}(s)
 	}
-	a.waitWG.Wait()
+	wg.Wait()
 }
 
 func (a *app) term(wg *sync.WaitGroup) {
@@ -105,28 +105,31 @@ func (a *app) term(wg *sync.WaitGroup) {
 
 func (a *app) signalHandler(wg *sync.WaitGroup) {
 	ch := make(chan os.Signal, 10)
-	signal.Notify(ch, a.restartSig)
+	signal.Notify(ch, syscall.SIGTERM, a.restartSig)
 	for {
-		<-ch
-		signal.Stop(ch)
-		err := a.preStartProcess()
-		if err != nil {
-			a.errors <- err
-		}
-		// we only return here if there's an error, otherwise the new process
-		// will send us a TERM when it's ready to trigger the actual shutdown.
-		if pid, err := a.net.StartProcess(); err != nil {
-			a.errors <- err
-		} else {
-			if logger != nil {
-				logger.Printf("New pid %d.", pid)
-			}
-			a.term(a.waitWG)
-			a.waitWG.Wait()
-			err = a.sufStartProcess()
+		sig := <-ch
+		logger.Println("recive:", sig)
+		if sig == a.restartSig {
+			err := a.preStartProcess()
 			if err != nil {
 				a.errors <- err
 			}
+			// we only return here if there's an error, otherwise the new process
+			// will send us a TERM when it's ready to trigger the actual shutdown.
+			if pid, err := a.net.StartProcess(); err != nil {
+				a.errors <- err
+			} else {
+				if logger != nil {
+					logger.Printf("New pid %d.", pid)
+				}
+				err = a.sufStartProcess()
+				if err != nil {
+					a.errors <- err
+				}
+			}
+		} else if sig != a.restartSig {
+			signal.Stop(ch)
+			a.term(wg)
 			return
 		}
 	}
@@ -189,6 +192,9 @@ func (a *app) run() error {
 // ServeWithOptions does the same as Serve, but takes a set of options to
 // configure the app struct.
 func ServeWithOptions(restartSig os.Signal, servers []*http.Server, options ...option) error {
+	if e := isLegitimateSig(restartSig); e != nil {
+		return e
+	}
 	a := newApp(servers)
 	a.restartSig = restartSig
 	for _, opt := range options {
@@ -200,9 +206,23 @@ func ServeWithOptions(restartSig os.Signal, servers []*http.Server, options ...o
 // Serve will serve the given http.Servers.
 // restartSig: 当进程接收到系统信号，会进行平滑重启操作
 func Serve(restartSig os.Signal, servers ...*http.Server) error {
+	if e := isLegitimateSig(restartSig); e != nil {
+		return e
+	}
 	a := newApp(servers)
 	a.restartSig = restartSig
 	return a.run()
+}
+
+func isLegitimateSig(restartSig os.Signal) error {
+	if restartSig != syscall.SIGHUP &&
+		restartSig != syscall.SIGINT &&
+		restartSig != syscall.SIGTSTP &&
+		restartSig != syscall.SIGUSR1 &&
+		restartSig != syscall.SIGUSR2 {
+		return errors.New("restartSig must be in [SIGHUP, SIGTSTP, SIGUSR1, SIGUSR2]")
+	}
+	return nil
 }
 
 // PreStartProcess configures a callback to trigger during graceful restart

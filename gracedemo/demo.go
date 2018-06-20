@@ -5,11 +5,13 @@ package main
 import (
 	"flag"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
+	"syscall"
 	"time"
 
-	"github.com/facebookgo/grace/gracehttp"
+	"github.com/sunreaver/grace/gracehttp"
 )
 
 var (
@@ -21,10 +23,17 @@ var (
 
 func main() {
 	flag.Parse()
-	gracehttp.Serve(
-		&http.Server{Addr: *address0, Handler: newHandler("Zero  ")},
-		&http.Server{Addr: *address1, Handler: newHandler("First ")},
-		&http.Server{Addr: *address2, Handler: newHandler("Second")},
+	gracehttp.SetLogger(log.New(os.Stdout, "[grace]", 1))
+	gracehttp.ServeWithOptions(
+		syscall.SIGHUP,
+		[]*http.Server{
+			&http.Server{Addr: *address0, Handler: newHandler("Zero  ")},
+			&http.Server{Addr: *address1, Handler: newHandler("First ")},
+			&http.Server{Addr: *address2, Handler: newHandler("Second")},
+		},
+		gracehttp.SufStartProcess(func() error {
+			return nil
+		}),
 	)
 }
 
