@@ -122,10 +122,6 @@ func (a *app) signalHandler(wg *sync.WaitGroup) {
 				if logger != nil {
 					logger.Printf("New pid %d.", pid)
 				}
-				err = a.sufStartProcess()
-				if err != nil {
-					a.errors <- err
-				}
 			}
 		} else if sig != a.restartSig {
 			signal.Stop(ch)
@@ -180,11 +176,13 @@ func (a *app) run() error {
 		if logger != nil {
 			logger.Printf("Exiting err %v.", err)
 		}
+		a.sufStartProcess()
 		return err
 	case <-waitdone:
 		if logger != nil {
 			logger.Printf("Exiting pid %d.", os.Getpid())
 		}
+		a.sufStartProcess()
 		return nil
 	}
 }
