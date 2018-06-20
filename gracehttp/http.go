@@ -215,6 +215,7 @@ func Serve(restartSig os.Signal, servers ...*http.Server) error {
 func isLegitimateSig(restartSig os.Signal) error {
 	if restartSig != syscall.SIGHUP &&
 		restartSig != syscall.SIGINT &&
+		restartSig != syscall.SIGQUIT &&
 		restartSig != syscall.SIGTSTP &&
 		restartSig != syscall.SIGUSR1 &&
 		restartSig != syscall.SIGUSR2 {
