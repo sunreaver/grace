@@ -219,7 +219,7 @@ func isLegitimateSig(restartSig os.Signal) error {
 		restartSig != syscall.SIGTSTP &&
 		restartSig != syscall.SIGUSR1 &&
 		restartSig != syscall.SIGUSR2 {
-		return errors.New("restartSig must be in [SIGHUP, SIGTSTP, SIGUSR1, SIGUSR2]")
+		return errors.New("restartSig must be in [SIGHUP, SIGINT, SIGQUIT, SIGTSTP, SIGUSR1, SIGUSR2]")
 	}
 	return nil
 }
