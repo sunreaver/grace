@@ -111,9 +111,9 @@ func (h *harness) Start() {
 
 // Restart the most recent server.
 func (h *harness) Restart() {
-	err := h.MostRecentProcess().Signal(syscall.SIGUSR2)
+	err := h.MostRecentProcess().Signal(syscall.SIGHUP)
 	if err != nil {
-		h.T.Fatalf("Failed to send SIGUSR2 and restart process: %s", err)
+		h.T.Fatalf("Failed to send SIGHUP and restart process: %s", err)
 	}
 	<-h.newProcess
 }
