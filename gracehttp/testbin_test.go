@@ -10,10 +10,11 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
-	"github.com/facebookgo/grace/gracehttp"
+	"github.com/sunreaver/grace/gracehttp"
 )
 
 const preStartProcessEnv = "GRACEHTTP_PRE_START_PROCESS"
@@ -138,7 +139,7 @@ func testbinMain() {
 	}
 
 	if testOption == -1 {
-		err := gracehttp.Serve(servers...)
+		err := gracehttp.Serve(syscall.SIGHUP, servers...)
 		if err != nil {
 			log.Fatalf("Error in gracehttp.Serve: %s", err)
 		}
@@ -163,6 +164,7 @@ func testbinMain() {
 			}
 
 			err := gracehttp.ServeWithOptions(
+				syscall.SIGHUP,
 				servers,
 				gracehttp.PreStartProcess(func() error {
 					err := os.Setenv(preStartProcessEnv, "FIRED")
